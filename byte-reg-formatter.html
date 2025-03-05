@@ -1,0 +1,426 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>CSV Category Processor</title>
+    <!-- Bootstrap CSS -->
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/bootstrap/5.3.0/css/bootstrap.min.css" rel="stylesheet">
+    <!-- PapaParse for CSV processing -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/PapaParse/5.3.2/papaparse.min.js"></script>
+    <style>
+        .spinner-border {
+            width: 3rem;
+            height: 3rem;
+        }
+    </style>
+</head>
+<body>
+    <div class="container py-5">
+        <h1 class="mb-4 text-primary">CSV Category Processor</h1>
+
+        <div class="card shadow-sm mb-4">
+            <div class="card-body">
+                <div class="alert alert-info mb-4">
+                    <h4 class="alert-heading">Instructions</h4>
+                    <p>This tool processes CSV files containing registration data with multiple categories. It will:</p>
+                    <ol>
+                        <li>Identify different categories in the file</li>
+                        <li>Allow you to rename each category</li>
+                        <li>Remove intermediate blank rows, duplicate header rows, and the donations section</li>
+                        <li>Create a clean CSV file with a single header row and data rows</li>
+                    </ol>
+                </div>
+
+                <div class="mb-4">
+                    <h4>Step 1: Select a CSV File</h4>
+                    <div class="mb-3">
+                        <input class="form-control" type="file" id="csvFile" accept=".csv">
+                    </div>
+                    <button id="analyzeBtn" class="btn btn-primary">Analyze File</button>
+                </div>
+
+                <div id="loading" class="text-center my-4" style="display: none;">
+                    <div class="spinner-border text-primary" role="status">
+                        <span class="visually-hidden">Loading...</span>
+                    </div>
+                    <p class="mt-2">Processing file...</p>
+                </div>
+
+                <div id="categoryRenamer" style="display: none;">
+                    <hr class="my-4">
+                    <h4>Step 2: Rename Categories</h4>
+                    <p>For each identified category, enter a new name or keep the existing one:</p>
+                    <div id="categoryInputs" class="mb-3"></div>
+                    <button id="processBtn" class="btn btn-success">Process CSV</button>
+                </div>
+
+                <div id="result" style="display: none;">
+                    <hr class="my-4">
+                    <h4>Step 3: Download Processed CSV</h4>
+                    <div class="alert alert-success">
+                        <p class="mb-0">Your CSV file has been processed successfully!</p>
+                    </div>
+                    <button id="downloadBtn" class="btn btn-primary">
+                        <i class="bi bi-download"></i> Download Processed CSV
+                    </button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Bootstrap Bundle with Popper -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/bootstrap/5.3.0/js/bootstrap.bundle.min.js"></script>
+    
+    <script>
+        /**
+         * Process a CSV file containing registrations with different categories.
+         * This function cleans up the file by removing intermediate blank rows,
+         * duplicate headers, and the donations section.
+         * It also allows the user to rename categories.
+         * 
+         * @param {File|Blob} file - The CSV file to process
+         * @returns {Promise<Object>} - An object containing the processed CSV data and category information
+         */
+        async function processRegistrationCSV(file) {
+            // Parse the uploaded CSV file
+            const fileContent = await readFileAsText(file);
+            const parsedData = Papa.parse(fileContent, {
+                skipEmptyLines: false, // Keep empty lines to detect section breaks
+                header: false // Don't treat first row as headers yet
+            });
+            
+            const rows = parsedData.data;
+            
+            // Step 1: Identify the categories
+            const categories = identifyCategories(rows);
+            console.log("Categories found:", categories.map(c => c.name));
+            
+            // Step 2: Get user input for category renaming
+            const categoryMappings = {};
+            for (const category of categories) {
+                const inputElement = document.getElementById(`category-${btoa(category.name)}`);
+                categoryMappings[category.name] = inputElement.value || category.name;
+            }
+            
+            // Step 3: Extract the header row (same for all sections)
+            const headerRow = findHeaderRow(rows);
+            if (!headerRow) {
+                throw new Error("Could not find header row in the CSV file");
+            }
+            
+            // Step 4: Process data - apply category renames and clean up the data
+            const cleanedData = processData(rows, categories, categoryMappings, headerRow);
+            
+            // Step 5: Generate the new CSV
+            const newCsv = Papa.unparse(cleanedData);
+            
+            return {
+                processedCsv: newCsv,
+                categories: categories.map(c => c.name),
+                categoryMappings
+            };
+        }
+
+        /**
+         * Identifies categories in the CSV file
+         * 
+         * @param {Array<Array<string>>} rows - The parsed CSV data as rows
+         * @returns {Array<Object>} - Array of category objects with name and row boundaries
+         */
+        function identifyCategories(rows) {
+            const categories = [];
+            let currentCategory = null;
+            let currentStart = null;
+            
+            for (let i = 0; i < rows.length; i++) {
+                const row = rows[i];
+                
+                // Check if this is a category header row
+                if (row.length > 0 && row[0] && row[0].trim() !== '' && 
+                    (!row[1] || row[1].trim() === '') && 
+                    !row[0].toLowerCase().includes("donation")) {
+                    
+                    if (currentCategory) {
+                        // End previous category
+                        categories.push({
+                            name: currentCategory,
+                            startRow: currentStart,
+                            endRow: i - 1
+                        });
+                    }
+                    currentCategory = row[0].trim();
+                    currentStart = i;
+                }
+                
+                // If we reach a donations section, end the current category
+                if (row.length > 0 && row[0] && row[0].toLowerCase().includes("donation")) {
+                    if (currentCategory) {
+                        categories.push({
+                            name: currentCategory,
+                            startRow: currentStart,
+                            endRow: i - 1
+                        });
+                    }
+                    break; // Stop processing once we hit donations section
+                }
+                
+                // Handle the last category
+                if (i === rows.length - 1 && currentCategory) {
+                    categories.push({
+                        name: currentCategory,
+                        startRow: currentStart,
+                        endRow: i
+                    });
+                }
+            }
+            
+            return categories;
+        }
+
+        /**
+         * Finds the header row in the CSV data
+         * 
+         * @param {Array<Array<string>>} rows - The parsed CSV data as rows
+         * @returns {Array<string>|null} - The header row or null if not found
+         */
+        function findHeaderRow(rows) {
+            for (let i = 0; i < rows.length; i++) {
+                const row = rows[i];
+                if (row.length > 1 && row[0] === "category" && row[1] === "order id") {
+                    return row;
+                }
+            }
+            return null;
+        }
+
+        /**
+         * Processes the data to apply category renames and clean up
+         * 
+         * @param {Array<Array<string>>} rows - The parsed CSV data as rows
+         * @param {Array<Object>} categories - Array of category objects
+         * @param {Object} categoryMappings - Object mapping original category names to new names
+         * @param {Array<string>} headerRow - The header row
+         * @returns {Array<Array<string>>} - The processed data
+         */
+        function processData(rows, categories, categoryMappings, headerRow) {
+            const result = [headerRow]; // Start with the header row
+            
+            // Create a mapping of original short category names to new short category names
+            const shortNameMappings = {};
+            
+            for (const category of categories) {
+                const fullOriginalName = category.name;
+                // Find the sample data row to get the actual category value in the data
+                let sampleCategoryValue = null;
+                
+                for (let i = category.startRow + 1; i <= category.endRow; i++) {
+                    const row = rows[i];
+                    if (row.length > 1 && row[0] !== "category" && row[0].trim() !== '') {
+                        sampleCategoryValue = row[0];
+                        break;
+                    }
+                }
+                
+                if (sampleCategoryValue) {
+                    // Get the user's renamed category
+                    const newFullName = categoryMappings[fullOriginalName];
+                    
+                    // For the new name, extract the relevant part (without "Register" and date)
+                    let newShortName = newFullName;
+                    if (newFullName.startsWith('Register')) {
+                        const datePart = newFullName.match(/\d{4}-\d{2}-\d{2}/);
+                        if (datePart) {
+                            newShortName = newFullName.substring(9, newFullName.indexOf(datePart[0])).trim();
+                        } else {
+                            newShortName = newFullName.substring(9).trim();
+                        }
+                    }
+                    
+                    // Map the original category value to the new one
+                    shortNameMappings[sampleCategoryValue] = newShortName;
+                }
+            }
+            
+            console.log("Category mappings:", shortNameMappings);
+            
+            // Process each category section
+            for (const category of categories) {
+                // Find the data rows for this category
+                let dataStartRow = -1;
+                
+                for (let i = category.startRow + 1; i <= category.endRow; i++) {
+                    if (rows[i].length > 1 && rows[i][0] !== "category") {
+                        dataStartRow = i;
+                        break;
+                    }
+                }
+                
+                if (dataStartRow === -1) continue; // Skip if no data rows found
+                
+                // Add data rows with renamed category
+                for (let i = dataStartRow; i <= category.endRow; i++) {
+                    const row = [...rows[i]]; // Create a copy to avoid modifying original
+                    
+                    // Skip blank rows
+                    if (row.length === 0 || (row.length === 1 && (!row[0] || row[0].trim() === ''))) {
+                        continue;
+                    }
+                    
+                    // Skip duplicate header rows
+                    if (row.length > 1 && row[0] === "category" && row[1] === "order id") {
+                        continue;
+                    }
+                    
+                    // Only include rows that have actual data
+                    if (row.length > 1) {
+                        // Apply category rename
+                        const originalCategoryValue = row[0];
+                        if (shortNameMappings[originalCategoryValue]) {
+                            row[0] = shortNameMappings[originalCategoryValue];
+                        }
+                        
+                        result.push(row);
+                    }
+                }
+            }
+            
+            return result;
+        }
+
+        /**
+         * Reads a file as text
+         * 
+         * @param {File|Blob} file - The file to read
+         * @returns {Promise<string>} - Promise resolving to the file content as text
+         */
+        function readFileAsText(file) {
+            return new Promise((resolve, reject) => {
+                const reader = new FileReader();
+                reader.onload = () => resolve(reader.result);
+                reader.onerror = reject;
+                reader.readAsText(file);
+            });
+        }
+
+        // UI interaction code
+        let processedCsvData = null;
+        let selectedFile = null;
+
+        // Analyze button click handler
+        document.getElementById('analyzeBtn').addEventListener('click', async () => {
+            const fileInput = document.getElementById('csvFile');
+            if (!fileInput.files || fileInput.files.length === 0) {
+                alert('Please select a CSV file');
+                return;
+            }
+            
+            selectedFile = fileInput.files[0];
+            document.getElementById('loading').style.display = 'block';
+            document.getElementById('categoryRenamer').style.display = 'none';
+            document.getElementById('result').style.display = 'none';
+            
+            try {
+                // Read the file
+                const fileContent = await readFileAsText(selectedFile);
+                const parsedData = Papa.parse(fileContent, {
+                    skipEmptyLines: false,
+                    header: false
+                });
+                
+                // Identify categories
+                const categories = identifyCategories(parsedData.data);
+                
+                // Create input fields for each category
+                const categoryInputsContainer = document.getElementById('categoryInputs');
+                categoryInputsContainer.innerHTML = '';
+                
+                for (const category of categories) {
+                    // Create a simplified name suggestion by removing date and "Register"
+                    const nameParts = category.name.split(' ');
+                    let suggestedName = category.name;
+                    
+                    if (nameParts[0] === 'Register') {
+                        const datePartIndex = nameParts.findIndex(part => part.includes('2023'));
+                        if (datePartIndex > 0) {
+                            suggestedName = nameParts.slice(1, datePartIndex).join(' ');
+                        }
+                    }
+                    
+                    const formGroup = document.createElement('div');
+                    formGroup.className = 'mb-3 row';
+                    
+                    const label = document.createElement('label');
+                    label.className = 'col-sm-6 col-form-label';
+                    label.textContent = category.name + ':';
+                    
+                    const inputDiv = document.createElement('div');
+                    inputDiv.className = 'col-sm-6';
+                    
+                    const input = document.createElement('input');
+                    input.type = 'text';
+                    input.className = 'form-control';
+                    input.id = `category-${btoa(category.name)}`;
+                    input.value = suggestedName;
+                    
+                    inputDiv.appendChild(input);
+                    formGroup.appendChild(label);
+                    formGroup.appendChild(inputDiv);
+                    categoryInputsContainer.appendChild(formGroup);
+                }
+                
+                document.getElementById('categoryRenamer').style.display = 'block';
+            } catch (error) {
+                console.error('Error analyzing file:', error);
+                alert('Error analyzing file: ' + error.message);
+            } finally {
+                document.getElementById('loading').style.display = 'none';
+            }
+        });
+
+        // Process button click handler
+        document.getElementById('processBtn').addEventListener('click', async () => {
+            if (!selectedFile) {
+                alert('Please select a CSV file');
+                return;
+            }
+            
+            document.getElementById('loading').style.display = 'block';
+            document.getElementById('result').style.display = 'none';
+            
+            try {
+                const result = await processRegistrationCSV(selectedFile);
+                processedCsvData = result.processedCsv;
+                document.getElementById('result').style.display = 'block';
+            } catch (error) {
+                console.error('Error processing file:', error);
+                alert('Error processing file: ' + error.message);
+            } finally {
+                document.getElementById('loading').style.display = 'none';
+            }
+        });
+
+        // Download button click handler
+        document.getElementById('downloadBtn').addEventListener('click', () => {
+            if (!processedCsvData) {
+                alert('No processed data available. Please process a file first.');
+                return;
+            }
+            
+            // Create a blob with the CSV data
+            const blob = new Blob([processedCsvData], { type: 'text/csv;charset=utf-8;' });
+            
+            // Create a link to download the file
+            const link = document.createElement('a');
+            const url = URL.createObjectURL(blob);
+            link.setAttribute('href', url);
+            link.setAttribute('download', 'processed_data.csv');
+            link.style.visibility = 'hidden';
+            
+            document.body.appendChild(link);
+            link.click();
+            document.body.removeChild(link);
+        });
+    </script>
+</body>
+</html>
